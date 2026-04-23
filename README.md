@@ -1,113 +1,161 @@
-# PDF Chatbot with LangChain and Llama 3.2
+# 🧠 RAG PDF Chatbot 
 
-This repository contains a question-answering chatbot that uses a PDF document as its knowledge base. It leverages LangChain, Ollama running Llama 3.2, FastAPI, and Streamlit to provide an end-to-end solution for interacting with PDF content.
+A production-ready Retrieval-Augmented Generation (RAG) chatbot that lets you chat with any PDF document. Built with LangChain, Ollama (Llama 3.2), FastAPI, and Streamlit.
 
-## Features
+---
 
-- Upload and process PDF documents
-- Ask questions about the PDF content
-- Retrieve accurate answers with citations to source pages
-- Streaming responses for a better user experience
-- Simple and intuitive UI
+| Area | Enhancement |
+|---|---|
+| **Multi-PDF support** | Upload and switch between multiple PDFs without restarting |
+| **Conversation history** | The LLM receives the last 6 turns so follow-up questions work naturally |
+| **Source chips** | Retrieved page numbers shown as styled chips under each answer |
+| **MMR retrieval** | Switched from plain similarity to Maximum Marginal Relevance for more diverse context chunks |
+| **PDF manager** | Sidebar lists all loaded PDFs with status, page count, chunk count, and a delete button |
+| **Health endpoint** | `/health` reports API status, Ollama status, available models, and loaded PDF count |
+| **PDF list endpoint** | `GET /pdfs/` returns metadata for all loaded documents |
+| **Delete endpoint** | `DELETE /pdf/{id}` removes a PDF from memory |
+| **File size guard** | Rejects PDFs over 50 MB (configurable via `MAX_PDF_SIZE_MB` env var) |
+| **Structured logging** | All backend events logged with timestamps and levels |
+| **Environment config** | `OLLAMA_BASE_URL`, `LLM_MODEL`, `EMBED_MODEL`, `MAX_PDF_SIZE_MB` configurable via env |
+| **Cursor indicator** | Streaming responses show a `▌` cursor while text is arriving |
+| **Timeout handling** | Frontend shows a clear message on slow model responses |
+| **Dark UI** | Redesigned frontend with IBM Plex fonts, monospace accents, source chips, and clean dark theme |
+| **Dependency cleanup** | Removed duplicate `PyPDF2`, pinned versions, added `python-dotenv` |
 
-## Technologies Used
+---
 
-- **LangChain**: Orchestrates document processing and retrieval-augmented generation (RAG)
-- **Ollama**: Runs Llama 3.2 locally for inference
-- **FastAPI**: Provides the backend API
-- **Streamlit**: Delivers a clean, interactive frontend
-- **FAISS**: Enables efficient vector similarity search
-- **HuggingFace Sentence Transformers**: Powers text embeddings
+## 🗂 Project Structure
 
-## Prerequisites
+```
+RAG-BASED-CHAT/
+├── backend/
+│   └── app.py          # FastAPI backend (enhanced)
+├── frontend/
+│   └── app.py          # Streamlit frontend (enhanced)
+├── requirements.txt    # Pinned, compatible dependencies
+└── README.md
+```
 
-1. [Ollama](https://ollama.com/) installed locally
-2. Llama 3.2 model pulled in Ollama:
+---
+
+## ⚙️ Prerequisites
+
+1. **Python 3.10+**
+2. **[Ollama](https://ollama.com/)** installed and running
+3. Llama 3.2 pulled:
    ```bash
-   ollama pull llama3.2
+   ollama pull llama3.2:3b
    ```
-3. Python 3.8+ installed
-4. Verify that Ollama is running:
+4. Verify Ollama:
    ```bash
    curl http://localhost:11434/api/tags
    ```
-   - If it returns a list of models, Ollama is running.
-   - If you get a connection error, start Ollama manually:
-     ```bash
-     ollama serve
-     ```
 
-## Installation
+---
 
-1. Clone this repository:
-   ```bash
-   git clone https://github.com/CoderArnav-bot/RAG-BASED-CHAT.git
-   cd RAG-BASED-CHAT
-   ```
-2. Create and activate a virtual environment:
-   ```bash
-   python -m venv venv
-   ```
+## 🚀 Installation
 
-   ```bash
-   source venv/bin/activate  # On Windows, use `venv\Scripts\activate`
-   ```
-3. Install dependencies:
-   ```bash
-   pip install -r requirements.txt --no-cache-dir
-   ```
+```bash
+git clone https://github.com/Sakshamg251206/DocuRAG.git
+cd DocuRAG
 
-## Running the Application
+python -m venv venv
+source venv/bin/activate        # Windows: venv\Scripts\activate
 
-1. Start the FastAPI backend:
-   ```bash
-   python backend\app.py
-   ```
+pip install -r requirements.txt --no-cache-dir
+```
 
-2. Start the Streamlit frontend in a new terminal:
-   ```bash
-   cd frontend
-   streamlit run frontend\app.py
-   ```
+---
 
-3. Open your browser and navigate to [http://localhost:8501](http://localhost:8501)
+## ▶️ Running
 
-## Usage
+**Terminal 1 — Backend:**
+```bash
+python backend/app.py
+# API docs at http://localhost:8000/docs
+# Health check at http://localhost:8000/health
+```
 
-1. Upload a PDF document using the sidebar.
-2. Wait for the processing to complete (indicated by a success message).
-3. Ask questions in the chat input at the bottom of the page.
-4. View AI-generated answers with page citations.
+**Terminal 2 — Frontend:**
+```bash
+streamlit run frontend/app.py
+# Open http://localhost:8501
+```
 
-## How It Works
+---
 
-1. **Document Processing**:
-   - The PDF text is extracted and split into chunks with overlap.
-   - Each chunk is embedded and stored in a FAISS vector store.
+## 🔧 Environment Variables
 
-2. **Question Answering**:
-   - The user's question is embedded.
-   - The most relevant chunks are retrieved from the vector store.
-   - Context and question are sent to Llama 3.2.
-   - An answer is generated and displayed with citations.
+Override defaults without touching code:
 
-## Limitations
+| Variable | Default | Description |
+|---|---|---|
+| `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama server URL |
+| `LLM_MODEL` | `llama3.2:3b` | Model used for generation |
+| `EMBED_MODEL` | `sentence-transformers/all-MiniLM-L6-v2` | Embedding model |
+| `MAX_PDF_SIZE_MB` | `50` | Maximum upload size in MB |
 
-- Works best with text-based PDFs (not scanned documents)
-- Processing large PDFs may take some time
-- Answer quality depends on the Llama 3.2 model capabilities
+Example:
+```bash
+LLM_MODEL=llama3.1:8b python backend/app.py
+```
 
-## Future Improvements
+---
 
-- Adding logs for each request
-- Dynamic switching between LLMs
-- OCR support for scanned documents
-- Multi-document support
-- Filter responses by document sections
-- Improved answer validation
+## 📡 API Reference
 
-## Demo
-https://github.com/user-attachments/assets/779359ca-855f-4164-8a6d-a0b1f71c82b6
+| Method | Endpoint | Description |
+|---|---|---|
+| `GET` | `/health` | System health + Ollama status |
+| `POST` | `/upload-pdf/` | Upload and index a PDF |
+| `GET` | `/pdfs/` | List all loaded PDFs |
+| `GET` | `/pdf-status/{id}` | Status of a specific PDF |
+| `DELETE` | `/pdf/{id}` | Remove a PDF from memory |
+| `POST` | `/query/` | Non-streaming Q&A |
+| `POST` | `/query-stream/` | Streaming Q&A (SSE) |
 
-- Tested on cpu based low end pc.
+Interactive docs: [http://localhost:8000/docs](http://localhost:8000/docs)
 
+---
+
+## 🔬 How It Works
+
+```
+PDF Upload
+    │
+    ▼
+PyPDFLoader → RecursiveCharacterTextSplitter (1000 chars / 200 overlap)
+    │
+    ▼
+HuggingFace Embeddings (all-MiniLM-L6-v2)
+    │
+    ▼
+FAISS Vector Store (IndexFlatL2)
+    │
+    ▼
+MMR Retriever (k=5, fetch_k=20)  ← more diverse than plain similarity
+    │
+User Question + Conversation History
+    │
+    ▼
+Prompt Builder → Ollama (Llama 3.2) → Streaming SSE response
+```
+
+---
+
+## ⚠️ Limitations
+
+- Text-based PDFs only (no OCR for scanned documents)
+- All state is in-memory — PDFs must be re-uploaded after restart
+- Performance depends on your CPU and the Ollama model size
+
+---
+
+## 🗺 Roadmap
+
+- [ ] Persistent vector store (SQLite / ChromaDB)
+- [ ] OCR support via `pytesseract`
+- [ ] Dynamic LLM switching from the UI
+- [ ] Multi-document cross-query
+- [ ] Answer confidence scoring
+- [ ] Docker Compose deployment
