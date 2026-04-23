@@ -1,4 +1,4 @@
-# backend/app.py
+# backend/app.py - Enhanced Version
 from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
 import httpx
 from fastapi.middleware.cors import CORSMiddleware
@@ -8,8 +8,11 @@ import uvicorn
 import os
 import uuid
 import shutil
-from typing import List
+from typing import List, Optional, Dict
 import json
+import time
+import logging
+from datetime import datetime
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_community.vectorstores.faiss import FAISS
@@ -19,9 +22,17 @@ from langchain.chains import RetrievalQA
 from langchain_community.docstore.in_memory import InMemoryDocstore
 from faiss import IndexFlatL2
 
-app = FastAPI(title="PDF Chatbot API")
+# ── Logging ──────────────────────────────────────────────────────────────────
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(name)s – %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger("pdf-chatbot")
 
-# Enable CORS
+# ── App ───────────────────────────────────────────────────────────────────────
+app = FastAPI(title="PDF Chatbot API", version="2.0.0")
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -30,217 +41,300 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Models
+# ── Models ────────────────────────────────────────────────────────────────────
 class QueryRequest(BaseModel):
     query: str
     pdf_id: str
+    conversation_history: Optional[List[Dict[str, str]]] = []
     stream: bool = True
 
 class QueryResponse(BaseModel):
     answer: str
     sources: List[str]
+    response_time_ms: int
 
-# Global variables
-pdf_processors = {}
+class OllamaStatus(BaseModel):
+    running: bool
+    models: List[str]
+
+# ── State ─────────────────────────────────────────────────────────────────────
+pdf_processors: Dict[str, dict] = {}
 temp_dir = "temp_pdfs"
-
-# Create temp directory if it doesn't exist
 os.makedirs(temp_dir, exist_ok=True)
 
-# Check if Ollama is running
-def check_ollama():
-    import requests
-    try:
-        response = requests.get("http://localhost:11434/api/tags")
-        return response.status_code == 200
-    except:
-        return False
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")
+LLM_MODEL       = os.getenv("LLM_MODEL", "llama3.2:3b")
+EMBED_MODEL      = os.getenv("EMBED_MODEL", "sentence-transformers/all-MiniLM-L6-v2")
+MAX_PDF_SIZE_MB  = int(os.getenv("MAX_PDF_SIZE_MB", "50"))
 
+# ── Helpers ───────────────────────────────────────────────────────────────────
+def check_ollama() -> OllamaStatus:
+    import requests as req
+    try:
+        r = req.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=3)
+        if r.status_code == 200:
+            models = [m["name"] for m in r.json().get("models", [])]
+            return OllamaStatus(running=True, models=models)
+    except Exception:
+        pass
+    return OllamaStatus(running=False, models=[])
+
+def build_prompt_with_history(context: str, query: str, history: List[Dict[str, str]]) -> str:
+    """Build a prompt that includes conversation history for context."""
+    history_text = ""
+    if history:
+        history_text = "CONVERSATION HISTORY:\n"
+        for turn in history[-6:]:          # keep last 6 turns to stay within context
+            role = "User" if turn["role"] == "user" else "Assistant"
+            history_text += f"{role}: {turn['content']}\n"
+        history_text += "\n"
+
+    return f"""You are a helpful assistant that answers questions strictly based on the provided PDF context.
+
+{history_text}DOCUMENT CONTEXT:
+{context}
+
+CURRENT QUESTION:
+{query}
+
+FORMAT REQUIREMENTS:
+- Write in clear, well-structured paragraphs.
+- Use "- " bullet points when listing items.
+- Use two line breaks between paragraphs.
+- If the answer is not in the context, say so honestly — do not fabricate information.
+
+ANSWER:"""
+
+# ── Startup ───────────────────────────────────────────────────────────────────
 @app.on_event("startup")
 async def startup_event():
-    if not check_ollama():
-        print("WARNING: Ollama is not running. Please start Ollama.")
+    status = check_ollama()
+    if not status.running:
+        logger.warning("Ollama is NOT running. Start it with: ollama serve")
+    else:
+        logger.info(f"Ollama running. Available models: {status.models}")
 
+# ── Health & Info ─────────────────────────────────────────────────────────────
 @app.get("/")
 async def root():
-    return {"message": "PDF Chatbot API is running"}
+    return {"message": "PDF Chatbot API v2.0 is running", "docs": "/docs"}
 
+@app.get("/health")
+async def health():
+    ollama = check_ollama()
+    return {
+        "status": "ok",
+        "ollama": ollama.dict(),
+        "loaded_pdfs": len([p for p in pdf_processors.values() if p.get("status") == "ready"]),
+        "timestamp": datetime.utcnow().isoformat(),
+    }
+
+# ── PDF Management ────────────────────────────────────────────────────────────
 @app.post("/upload-pdf/")
 async def upload_pdf(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
-    """Upload and process a PDF file using LangChain"""
-    if not file.filename.endswith('.pdf'):
-        raise HTTPException(status_code=400, detail="File must be a PDF")
-    
-    # Generate a unique ID for this PDF
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Only PDF files are accepted.")
+
+    # Size guard
+    contents = await file.read()
+    size_mb = len(contents) / (1024 * 1024)
+    if size_mb > MAX_PDF_SIZE_MB:
+        raise HTTPException(status_code=413, detail=f"PDF exceeds {MAX_PDF_SIZE_MB} MB limit.")
+
     pdf_id = str(uuid.uuid4())
-    
-    # Save the uploaded file
     file_path = os.path.join(temp_dir, f"{pdf_id}.pdf")
+
     with open(file_path, "wb") as f:
-        shutil.copyfileobj(file.file, f)
-    
-    # Process the PDF in the background
+        f.write(contents)
+
+    pdf_processors[pdf_id] = {
+        "filename": file.filename,
+        "status": "processing",
+        "uploaded_at": datetime.utcnow().isoformat(),
+        "size_mb": round(size_mb, 2),
+    }
+
+    logger.info(f"Received PDF '{file.filename}' ({size_mb:.1f} MB) → id={pdf_id}")
     background_tasks.add_task(process_pdf, file_path, pdf_id, file.filename)
-    
+
     return {"pdf_id": pdf_id, "filename": file.filename, "status": "processing"}
+
+
+@app.get("/pdfs/")
+async def list_pdfs():
+    """Return all loaded PDFs and their metadata."""
+    return [
+        {
+            "pdf_id": pid,
+            "filename": data.get("filename"),
+            "status": data.get("status"),
+            "uploaded_at": data.get("uploaded_at"),
+            "size_mb": data.get("size_mb"),
+            "pages": data.get("pages"),
+            "chunks": data.get("chunks"),
+        }
+        for pid, data in pdf_processors.items()
+    ]
+
 
 @app.get("/pdf-status/{pdf_id}")
 async def pdf_status(pdf_id: str):
     if pdf_id not in pdf_processors:
-        raise HTTPException(status_code=404, detail="PDF not found")
-
-    pdf_data = pdf_processors[pdf_id]
-    
+        raise HTTPException(status_code=404, detail="PDF not found.")
+    data = pdf_processors[pdf_id]
     return {
         "pdf_id": pdf_id,
-        "filename": pdf_data.get("filename", "Unknown"),
-        "status": pdf_data.get("status", "processing"),
+        "filename": data.get("filename", "Unknown"),
+        "status": data.get("status", "processing"),
+        "pages": data.get("pages"),
+        "chunks": data.get("chunks"),
+        "error": data.get("error"),
     }
 
 
+@app.delete("/pdf/{pdf_id}")
+async def delete_pdf(pdf_id: str):
+    if pdf_id not in pdf_processors:
+        raise HTTPException(status_code=404, detail="PDF not found.")
+    del pdf_processors[pdf_id]
+    logger.info(f"Deleted PDF id={pdf_id}")
+    return {"message": f"PDF {pdf_id} deleted successfully."}
+
+
+# ── Query Endpoints ───────────────────────────────────────────────────────────
 @app.post("/query/", response_model=QueryResponse)
 async def query(request: QueryRequest):
-    """Query the chatbot about the PDF content"""
-    if request.pdf_id not in pdf_processors or pdf_processors[request.pdf_id].get("status") != "ready":
-        raise HTTPException(status_code=404, detail="PDF not found or still processing")
-    
+    _validate_pdf_ready(request.pdf_id)
+    t0 = time.time()
     try:
-        # Get the retriever
         retriever = pdf_processors[request.pdf_id]["retriever"]
-        
-        # Create QA chain
         qa = RetrievalQA.from_chain_type(
-            llm=Ollama(model="llama3.2:3b", temperature=0.1),
+            llm=Ollama(model=LLM_MODEL, temperature=0.1, base_url=OLLAMA_BASE_URL),
             chain_type="stuff",
             retriever=retriever,
-            return_source_documents=True
+            return_source_documents=True,
         )
-        
-        # Get answer
         result = qa({"query": request.query})
-        
-        # Extract source page numbers
-        sources = [f"Page {doc.metadata.get('page', 'unknown')}" for doc in result.get("source_documents", [])]
-        
-        return {"answer": result["result"], "sources": sources}
+        sources = [f"Page {doc.metadata.get('page', '?')}" for doc in result.get("source_documents", [])]
+        elapsed = int((time.time() - t0) * 1000)
+        logger.info(f"Query answered in {elapsed}ms for pdf_id={request.pdf_id}")
+        return {"answer": result["result"], "sources": sources, "response_time_ms": elapsed}
     except Exception as e:
+        logger.error(f"Query error: {e}")
         raise HTTPException(status_code=500, detail=f"Error querying PDF: {str(e)}")
+
 
 @app.post("/query-stream/")
 async def query_stream(request: QueryRequest):
-    """Stream query results"""
-    if request.pdf_id not in pdf_processors or pdf_processors[request.pdf_id].get("status") != "ready":
-        raise HTTPException(status_code=404, detail="PDF not found or still processing")
-
+    _validate_pdf_ready(request.pdf_id)
     try:
-        # Get documents from retriever
         retriever = pdf_processors[request.pdf_id]["retriever"]
         docs = retriever.get_relevant_documents(request.query)
-
-        # Extract context from documents
-        separator = "\n" + "-"*50 + "\n"
+        separator = "\n" + "─" * 50 + "\n"
         context = separator.join([doc.page_content for doc in docs])
+        sources = list({f"Page {doc.metadata.get('page', '?')}" for doc in docs})
 
-        prompt = f"""You are a helpful assistant that answers questions strictly based on the provided context.
-CONTEXT:
-{context}
+        prompt = build_prompt_with_history(context, request.query, request.conversation_history or [])
 
-TASK: 
-{request.query}
+        logger.info(f"Streaming response for pdf_id={request.pdf_id} | query='{request.query[:60]}'")
 
-FORMAT REQUIREMENTS:
-- Format your answer with proper paragraphs
-- Use two line breaks between paragraphs
-- Use bullet points with "- " prefix when appropriate
-- Make sure all formatting is clearly visible in your plain text response
+        async def event_stream():
+            # First emit sources as a metadata event
+            yield f"event: sources\ndata: {json.dumps(sources)}\n\n"
+            async for chunk in stream_llm_response(prompt):
+                yield chunk
 
-NOTE: - If the answer cannot be derived from the context, say that you don't know based on the provided information. Don't make up answers that aren't supported by the context.
-      - If relevant context is found, please analyse and provide answer in proper readable format.
-"""
-
-        return StreamingResponse(
-            stream_llm_response(prompt),
-            media_type="text/event-stream"
-        )
+        return StreamingResponse(event_stream(), media_type="text/event-stream")
     except Exception as e:
+        logger.error(f"Stream error: {e}")
         raise HTTPException(status_code=500, detail=f"Error streaming response: {str(e)}")
 
 
-async def process_pdf(file_path: str, pdf_id: str, filename: str):
-    """Process a PDF file using LangChain components"""
+# ── Internal ──────────────────────────────────────────────────────────────────
+def _validate_pdf_ready(pdf_id: str):
+    if pdf_id not in pdf_processors:
+        raise HTTPException(status_code=404, detail="PDF not found.")
+    if pdf_processors[pdf_id].get("status") != "ready":
+        status = pdf_processors[pdf_id].get("status", "unknown")
+        raise HTTPException(status_code=400, detail=f"PDF is not ready (status: {status}).")
+
+
+def process_pdf(file_path: str, pdf_id: str, filename: str):
     try:
-        # Store filename
-        pdf_processors[pdf_id] = {"filename": filename}
-        
-        # Load PDF
+        logger.info(f"Processing '{filename}' (id={pdf_id})")
         loader = PyPDFLoader(file_path)
         documents = loader.load()
-        
-        # Add page numbers to metadata
+
         for i, doc in enumerate(documents):
             doc.metadata["page"] = i + 1
-        
-        # Split into chunks
+
         text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size = 1000,
-            chunk_overlap = 200,
+            chunk_size=1000,
+            chunk_overlap=200,
             keep_separator=True,
-            separators=[r"\nQus.\d+"],
-            is_separator_regex=True
+            separators=[r"\nQus.\d+", "\n\n", "\n", " "],
+            is_separator_regex=True,
         )
         chunks = text_splitter.split_documents(documents)
-        
-        embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2", model_kwargs = {'device': 'cpu'},encode_kwargs = {'normalize_embeddings': True})
-        
-        vector_store = FAISS(
-        embedding_function=embeddings,
-        index=IndexFlatL2(len(embeddings.embed_query(" "))),
-        docstore=InMemoryDocstore(),
-        index_to_docstore_id={},
-        distance_strategy="COSINE").from_documents(chunks, embeddings)
-        retriever = vector_store.as_retriever(search_type="similarity", search_kwargs={"k": 3})
-        pdf_processors[pdf_id]["retriever"] = retriever  # Store reference only
-        pdf_processors[pdf_id]["status"] = "ready"
-        
-        # Clean up
+
+        logger.info(f"  → {len(documents)} pages, {len(chunks)} chunks")
+
+        embeddings = HuggingFaceEmbeddings(
+            model_name=EMBED_MODEL,
+            model_kwargs={"device": "cpu"},
+            encode_kwargs={"normalize_embeddings": True},
+        )
+
+        vector_store = FAISS.from_documents(chunks, embeddings)
+        retriever = vector_store.as_retriever(
+            search_type="mmr",                            # ← Maximum Marginal Relevance (more diverse results)
+            search_kwargs={"k": 5, "fetch_k": 20},
+        )
+
+        pdf_processors[pdf_id].update({
+            "retriever": retriever,
+            "status": "ready",
+            "pages": len(documents),
+            "chunks": len(chunks),
+        })
+        logger.info(f"PDF '{filename}' ready.")
+
+    except Exception as e:
+        logger.error(f"Error processing '{filename}': {e}")
+        pdf_processors[pdf_id].update({"status": "error", "error": str(e)})
+    finally:
         try:
             os.remove(file_path)
-        except:
+        except OSError:
             pass
-            
-    except Exception as e:
-        pdf_processors[pdf_id] = {"filename": filename, "status": "error", "error": str(e)}
-        print(f"Error processing PDF: {e}")
+
 
 async def stream_llm_response(prompt: str):
-    """Stream responses from Ollama asynchronously"""
-    url = "http://localhost:11434/api/generate"
-
+    url = f"{OLLAMA_BASE_URL}/api/generate"
     async with httpx.AsyncClient(timeout=None) as client:
         try:
             async with client.stream(
                 "POST",
                 url,
                 headers={"Content-Type": "application/json"},
-                json={"model": "llama3.2:3b", "prompt": prompt, "stream": True}
+                json={"model": LLM_MODEL, "prompt": prompt, "stream": True},
             ) as response:
                 async for line in response.aiter_lines():
                     if line:
                         try:
-                            json_line = json.loads(line)
-                            chunk = json_line.get("response", "")
+                            data = json.loads(line)
+                            chunk = data.get("response", "")
                             if chunk:
-                                # Just send the chunk directly, preserve its formatting
                                 yield f"data: {chunk}\n\n"
-                            
-                            if json_line.get("done", False):
+                            if data.get("done", False):
                                 break
                         except json.JSONDecodeError:
                             pass
-                yield "data: [DONE]\n\n"
+            yield "data: [DONE]\n\n"
         except Exception as e:
-            yield f"data: Error connecting to Ollama: {str(e)}\n\n"
+            yield f"data: ⚠ Error connecting to Ollama: {str(e)}\n\n"
             yield "data: [DONE]\n\n"
 
+
 if __name__ == "__main__":
-    uvicorn.run("app:app", host="0.0.0.0", port=8000)
+    uvicorn.run("app:app", host="0.0.0.0", port=8000, reload=True)
