@@ -1,0 +1,22 @@
+# API service dependencies (Python 3.11+).
+# On Linux, install the CPU-only PyTorch build first to avoid downloading CUDA libraries:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+
+# Web framework
+fastapi==0.142.2
+uvicorn[standard]==0.54.0
+python-multipart==0.0.32
+pydantic==2.13.5
+pydantic-settings==2.15.0
+
+# LLM client (Ollama HTTP API)
+httpx==0.28.1
+
+# Retrieval pipeline
+pypdf[crypto]==6.19.0
+langchain-core==1.6.6
+langchain-text-splitters==1.1.2
+langchain-huggingface==1.2.2
+sentence-transformers==6.1.0
+faiss-cpu==1.15.1
+numpy==2.4.6
