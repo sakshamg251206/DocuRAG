@@ -1,0 +1,46 @@
+[project]
+name = "docurag"
+version = "3.0.0"
+description = "Chat with your PDF documents using retrieval-augmented generation and a local LLM."
+readme = "README.md"
+requires-python = ">=3.11"
+
+# Runtime dependencies are pinned in backend/requirements.txt and frontend/requirements.txt;
+# this file only holds project metadata and tool configuration.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "frontend"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+addopts = "-ra --strict-markers"
+filterwarnings = ["error::pytest.PytestUnraisableExceptionWarning"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py311"
+extend-exclude = ["data"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "UP", "SIM", "RUF", "S", "C4", "PTH", "RET"]
+ignore = [
+    "S101",   # assert is fine in tests and for type narrowing
+    "S104",   # binding to 0.0.0.0 is intentional inside containers
+    "RUF001", # the UI intentionally uses typographic characters such as "…"
+    "RUF002",
+    "RUF003",
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["backend", "api_client", "tests"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["backend", "frontend", "tests"]
+mypy_path = "frontend"
+strict = true
+warn_unreachable = true
+ignore_missing_imports = true
+disallow_untyped_calls = false
+disallow_subclassing_any = false
+plugins = ["pydantic.mypy"]
