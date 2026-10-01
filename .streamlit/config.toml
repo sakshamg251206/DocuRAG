@@ -1,0 +1,18 @@
+# Streamlit reads this file from the working directory, so start the UI from the repository root.
+
+[server]
+# Keep in sync with MAX_PDF_SIZE_MB on the API.
+maxUploadSize = 50
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
+
+# Both colour schemes are styled; the browser/OS preference decides which one is shown.
+[theme.light]
+primaryColor = "#4F46E5"
+
+[theme.dark]
+primaryColor = "#818CF8"
